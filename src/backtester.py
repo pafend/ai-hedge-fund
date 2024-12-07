@@ -107,7 +107,10 @@ class Backtester:
         )
         plt.ylabel("Portfolio Value ($)")
         plt.xlabel("Date")
-        plt.show()
+        start_date = performance_df.index.min().strftime('%Y-%m-%d')
+        end_date = performance_df.index.max().strftime('%Y-%m-%d')
+        plt.savefig(f"{self.ticker}_{start_date}_to_{end_date}.png")
+
 
         # Compute daily returns
         performance_df["Daily Return"] = performance_df["Portfolio Value"].pct_change()
@@ -139,15 +142,98 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Create an instance of Backtester
-    backtester = Backtester(
-        agent=run_hedge_fund,
-        ticker=args.ticker,
-        start_date=args.start_date,
-        end_date=args.end_date,
-        initial_capital=args.initial_capital,
-    )
+    import sqlite3
 
-    # Run the backtesting process
-    backtester.run_backtest()
-    performance_df = backtester.analyze_performance()
+    # Connect to SQLite database
+    conn = sqlite3.connect('backtest_performance.db')
+    cursor = conn.cursor()
+
+    # Create the main performance table if it doesn't exist
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS performance (
+            ticker TEXT,
+            date TEXT,
+            portfolio_value REAL,
+            daily_return REAL,
+            PRIMARY KEY (ticker, date)
+        )
+    ''')
+
+    def add_column_if_not_exists(table_name, column_name, column_type):
+        cursor.execute(f'''
+            PRAGMA table_info({table_name});
+        ''')
+        columns = [row[1] for row in cursor.fetchall()]
+        
+        if column_name not in columns:
+            cursor.execute(f'''
+                ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type};
+            ''')
+
+    # Add daily_return column if it doesn't exist
+    add_column_if_not_exists('performance', 'daily_return', 'REAL')
+
+    def backup_and_delete_historical_values(ticker):
+        # Create backup table if it doesn't exist
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS backup_performance (
+                ticker TEXT,
+                date TEXT,
+                portfolio_value REAL,
+                daily_return REAL,
+                PRIMARY KEY (ticker, date)
+            )
+        ''')
+        
+        # Insert records into backup table using parameter binding
+        cursor.execute('''
+            INSERT OR REPLACE INTO backup_performance 
+            SELECT * FROM performance WHERE ticker = ?
+        ''', (ticker,))
+        
+        # Delete old values from the performance table
+        cursor.execute("DELETE FROM performance WHERE ticker = ?", (ticker,))
+        conn.commit()
+
+    # List of tickers to backtest
+    tickers = [
+        "AAPL", "MSFT", "GOOGL", "AMZN", "FB", "TSLA", "BRK.B", "NVDA", "JPM", "V", 
+        "JNJ", "UNH", "PG", "HD", "MA", "DIS", "PYPL", "VZ", "NFLX", "INTC", 
+        "CMCSA", "PEP", "T", "CSCO", "ADBE", "XOM", "NKE", "MRK", "CVX", "ABT", 
+        "CRM", "TMO", "LLY", "IBM", "MDT", "COST", "AMGN", "QCOM", "TXN", "AVGO", 
+        "HON", "LMT", "SBUX", "NOW", "ISRG", "PM", "BA", "CAT", "GS", "BLK", 
+        "SCHW", "SPGI", "SYK", "DHR", "AMAT", "GILD", "LRCX", "ADP", "TROW", 
+        "ATVI", "FISV", "FIS", "KMB", "CL", "NEM", "MS", "ZTS", "MDLZ", "SRE", 
+        "CARR", "LNT", "DTE", "DOV", "ETR", "NDAQ", "WBA", "CNP", "WDC", "KMX", 
+        "NTRS", "VTRS", "VFC"]
+
+    for ticker in tickers:
+        # Backup and delete historical values for the ticker
+        backup_and_delete_historical_values(ticker)
+
+        # Create an instance of Backtester
+        backtester = Backtester(
+            agent=run_hedge_fund,
+            ticker=ticker,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            initial_capital=args.initial_capital,
+        )
+
+        # Run the backtesting process
+        backtester.run_backtest()
+        performance_df = backtester.analyze_performance()
+
+        # Save performance_df to the database
+        performance_df.reset_index(inplace=True)
+        performance_df['Ticker'] = ticker
+        performance_df.rename(columns={
+            'Date': 'date',
+            'Portfolio Value': 'portfolio_value',
+            'Daily Return': 'daily_return',
+            'Ticker': 'ticker'
+        }, inplace=True)
+        performance_df.to_sql('performance', conn, if_exists='append', index=False)
+
+    # Close the database connection
+    conn.close()

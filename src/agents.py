@@ -239,9 +239,11 @@ def fundamentals_agent(state: AgentState):
     except:
         tr_1 = tr
 
-    if tr_1 != 0 and tr/tr_1 > 0.10:  # 10% revenue growth
+    if tr_1 != 0:
         revenue_growth = tr/tr_1
-        growth_score += 1
+        if tr/tr_1 > 0.10:  # 10% revenue growth
+            growth_score += 1
+        
 
     first_missing = False
     deps = data["financial_metrics"].loc['Diluted EPS'].iloc[0]
@@ -256,9 +258,10 @@ def fundamentals_agent(state: AgentState):
     except:
         deps_1 = deps
 
-    if deps_1 != 0 and deps/deps_1 > 0.10:  # 10% earnings growth
+    if deps_1 != 0:
         earnings_growth = deps/deps_1
-        growth_score += 1
+        if deps/deps_1 > 0.10 or (deps > 0 and deps_1 < 0):  # 10% earnings growth or earnings growth from negative to positive
+            growth_score += 1
         
     signals.append('bullish' if growth_score >= 1 else 'bearish' if growth_score == 0 else 'neutral')
     reasoning["Growth"] = {
