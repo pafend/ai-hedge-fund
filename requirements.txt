@@ -1,0 +1,6 @@
+langchain-ollama
+langchain
+matplotlib
+langgraph
+langchain_openai
+yfinance

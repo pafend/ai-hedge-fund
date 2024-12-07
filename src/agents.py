@@ -1,19 +1,32 @@
 from functools import reduce
 from typing import Annotated, Any, Dict, Sequence, TypedDict
+from datetime import datetime, timedelta
 
 import operator
+import yfinance as yf  # Add yfinance for stock data
+import math
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai.chat_models import ChatOpenAI
+from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
+from langchain.callbacks.manager import CallbackManager
+from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 
-from src.tools import calculate_bollinger_bands, calculate_macd, calculate_obv, calculate_rsi, get_financial_metrics, get_prices, prices_to_df
+from tools import calculate_bollinger_bands, calculate_macd, calculate_obv, calculate_rsi, get_financial_metrics, get_prices, prices_to_df
 
 import argparse
-from datetime import datetime
 import json
 
-llm = ChatOpenAI(model="gpt-4o")
+# Initialize the ChatOllama model with proper format settings
+llm = ChatOllama(
+    model="qwen2.5:7b",  # Change to a model you have installed
+    temperature=0,
+    format="json",  # Specify the format as json
+    callback_manager=CallbackManager([StreamingStdOutCallbackHandler()]),
+    stop=["Human:", "Assistant:"],  # Add stop sequences
+    num_ctx=4096,  # Adjust context window if needed
+)
 
 def merge_dicts(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
     return {**a, **b}
@@ -193,7 +206,7 @@ def fundamentals_agent(state: AgentState):
     """Analyzes fundamental data and generates trading signals."""
     show_reasoning = state["metadata"]["show_reasoning"]
     data = state["data"]
-    metrics = data["financial_metrics"][0]  # Get the most recent metrics
+    metrics = data["financial_metrics"] # Get the most recent metrics
     
     # Initialize signals list for different fundamental aspects
     signals = []
@@ -201,67 +214,91 @@ def fundamentals_agent(state: AgentState):
     
     # 1. Profitability Analysis
     profitability_score = 0
-    if metrics["return_on_equity"] > 0.15:  # Strong ROE above 15%
-        profitability_score += 1
-    if metrics["net_margin"] > 0.20:  # Healthy profit margins
-        profitability_score += 1
-    if metrics["operating_margin"] > 0.15:  # Strong operating efficiency
-        profitability_score += 1
+    ni = data["financial_metrics"].loc['Net Income'].iloc[0]
+    oi = data["financial_metrics"].loc['Operating Income'].iloc[0]
+    tr = data["financial_metrics"].loc['Total Revenue'].iloc[0]
+    if tr != 0:
+        net_margin = ni/tr
+        operating_margin = oi/tr
+        if ni/tr > 0.20:  # Healthy profit margins
+            profitability_score += 1
+        if oi/tr > 0.15:  # Strong operating efficiency
+            profitability_score += 1
         
-    signals.append('bullish' if profitability_score >= 2 else 'bearish' if profitability_score == 0 else 'neutral')
+    signals.append('bullish' if profitability_score >= 1 else 'bearish' if profitability_score == 0 else 'neutral')
     reasoning["Profitability"] = {
         "signal": signals[0],
-        "details": f"ROE: {metrics['return_on_equity']:.2%}, Net Margin: {metrics['net_margin']:.2%}, Op Margin: {metrics['operating_margin']:.2%}"
+        "details": f"Net Margin: {net_margin:.2%}, Op Margin: {operating_margin:.2%}"
     }
     
     # 2. Growth Analysis
     growth_score = 0
-    if metrics["revenue_growth"] > 0.10:  # 10% revenue growth
+    tr = data["financial_metrics"].loc['Total Revenue'].iloc[0]
+    try:
+        tr_1 = data["financial_metrics"].loc['Total Revenue'].iloc[1]
+    except:
+        tr_1 = tr
+
+    if tr_1 != 0 and tr/tr_1 > 0.10:  # 10% revenue growth
+        revenue_growth = tr/tr_1
         growth_score += 1
-    if metrics["earnings_growth"] > 0.10:  # 10% earnings growth
-        growth_score += 1
-    if metrics["book_value_growth"] > 0.10:  # 10% book value growth
+
+    first_missing = False
+    deps = data["financial_metrics"].loc['Diluted EPS'].iloc[0]
+    if math.isnan(deps):
+        deps = data["financial_metrics"].loc['Diluted EPS'].iloc[1]
+        first_missing = True
+    try:
+        if first_missing:
+            deps_1 = data["financial_metrics"].loc['Diluted EPS'].iloc[2]
+        else:
+            deps_1 = data["financial_metrics"].loc['Diluted EPS'].iloc[1]
+    except:
+        deps_1 = deps
+
+    if deps_1 != 0 and deps/deps_1 > 0.10:  # 10% earnings growth
+        earnings_growth = deps/deps_1
         growth_score += 1
         
-    signals.append('bullish' if growth_score >= 2 else 'bearish' if growth_score == 0 else 'neutral')
+    signals.append('bullish' if growth_score >= 1 else 'bearish' if growth_score == 0 else 'neutral')
     reasoning["Growth"] = {
         "signal": signals[1],
-        "details": f"Revenue Growth: {metrics['revenue_growth']:.2%}, Earnings Growth: {metrics['earnings_growth']:.2%}"
+        "details": f"Revenue Growth: {revenue_growth:.2%}, Earnings Growth: {earnings_growth:.2%}"
     }
     
     # 3. Financial Health
-    health_score = 0
-    if metrics["current_ratio"] > 1.5:  # Strong liquidity
-        health_score += 1
-    if metrics["debt_to_equity"] < 0.5:  # Conservative debt levels
-        health_score += 1
-    if metrics["free_cash_flow_per_share"] > metrics["earnings_per_share"] * 0.8:  # Strong FCF conversion
-        health_score += 1
+    # health_score = 0
+    # if metrics["current_ratio"] > 1.5:  # Strong liquidity
+    #     health_score += 1
+    # if metrics["debt_to_equity"] < 0.5:  # Conservative debt levels
+    #     health_score += 1
+    # if metrics["free_cash_flow_per_share"] > metrics["earnings_per_share"] * 0.8:  # Strong FCF conversion
+    #     health_score += 1
         
-    signals.append('bullish' if health_score >= 2 else 'bearish' if health_score == 0 else 'neutral')
-    reasoning["Financial_Health"] = {
-        "signal": signals[2],
-        "details": f"Current Ratio: {metrics['current_ratio']:.2f}, D/E: {metrics['debt_to_equity']:.2f}"
-    }
+    # signals.append('bullish' if health_score >= 2 else 'bearish' if health_score == 0 else 'neutral')
+    # reasoning["Financial_Health"] = {
+    #     "signal": signals[2],
+    #     "details": f"Current Ratio: {metrics['current_ratio']:.2f}, D/E: {metrics['debt_to_equity']:.2f}"
+    # }
     
-    # 4. Valuation
-    pe_ratio = metrics["price_to_earnings_ratio"]
-    pb_ratio = metrics["price_to_book_ratio"]
-    ps_ratio = metrics["price_to_sales_ratio"]
+    # # 4. Valuation
+    # pe_ratio = metrics["price_to_earnings_ratio"]
+    # pb_ratio = metrics["price_to_book_ratio"]
+    # ps_ratio = metrics["price_to_sales_ratio"]
     
-    valuation_score = 0
-    if pe_ratio < 25:  # Reasonable P/E ratio
-        valuation_score += 1
-    if pb_ratio < 3:  # Reasonable P/B ratio
-        valuation_score += 1
-    if ps_ratio < 5:  # Reasonable P/S ratio
-        valuation_score += 1
+    # valuation_score = 0
+    # if pe_ratio < 25:  # Reasonable P/E ratio
+    #     valuation_score += 1
+    # if pb_ratio < 3:  # Reasonable P/B ratio
+    #     valuation_score += 1
+    # if ps_ratio < 5:  # Reasonable P/S ratio
+    #     valuation_score += 1
         
-    signals.append('bullish' if valuation_score >= 2 else 'bearish' if valuation_score == 0 else 'neutral')
-    reasoning["Valuation"] = {
-        "signal": signals[3],
-        "details": f"P/E: {pe_ratio:.2f}, P/B: {pb_ratio:.2f}, P/S: {ps_ratio:.2f}"
-    }
+    # signals.append('bullish' if valuation_score >= 2 else 'bearish' if valuation_score == 0 else 'neutral')
+    # reasoning["Valuation"] = {
+    #     "signal": signals[3],
+    #     "details": f"P/E: {pe_ratio:.2f}, P/B: {pb_ratio:.2f}, P/S: {ps_ratio:.2f}"
+    # }
     
     # Determine overall signal
     bullish_signals = signals.count('bullish')
@@ -502,11 +539,11 @@ app = workflow.compile()
 # Add this at the bottom of the file
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run the hedge fund trading system')
-    parser.add_argument('--ticker', type=str, required=True, help='Stock ticker symbol')
-    parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD). Defaults to 3 months before end date')
-    parser.add_argument('--end-date', type=str, help='End date (YYYY-MM-DD). Defaults to today')
+    parser.add_argument('--ticker', type=str, default="AAPL", help='Stock ticker symbol (e.g., AAPL)')
+    parser.add_argument('--end_date', type=str, default=datetime.now().strftime('%Y-%m-%d'), help='End date in YYYY-MM-DD format')
+    parser.add_argument('--start_date', type=str, default=(datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d'), help='Start date in YYYY-MM-DD format')
+    parser.add_argument('--initial_capital', type=float, default=100000, help='Initial capital amount (default: 100000)')
     parser.add_argument('--show-reasoning', action='store_true', help='Show reasoning from each agent')
-    
     args = parser.parse_args()
     
     # Validate dates if provided
